@@ -1,0 +1,181 @@
+name: Migration Orchestrator (Repository Dispatch)
+
+on:
+  workflow_call:
+    inputs:
+      SOURCE_INSTANCE:
+        required: true
+        type: string
+      SOURCE_ORG:
+        required: true
+        type: string
+      TARGET_INSTANCE:
+        required: true
+        type: string
+      TARGET_ORG:
+        required: true
+        type: string
+      REPOSITORY_URLS:
+        required: true
+        type: string
+      RUNNER:
+        type: string
+        default: 'ubuntu-latest'
+      INSTALL_PREREQS:
+        type: string
+        default: 'true'
+      BATCH_SIZE:
+        type: number
+        default: 250
+      MIGRATION_TYPE:
+        required: true
+        type: string
+
+jobs:
+  resolve-tokens:
+    name: Resolve Environment Tokens
+    runs-on: ${{ inputs.RUNNER }}
+    outputs:
+      target_token: ${{ steps.resolve.outputs.target_token }}
+      source_hostname: ${{ steps.resolve.outputs.source_hostname }}
+      target_hostname: ${{ steps.resolve.outputs.target_hostname }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Resolve tokens from config
+        id: resolve
+        uses: actions/github-script@v8
+        env:
+          SOURCE_INSTANCE: ${{ inputs.SOURCE_INSTANCE }}
+          TARGET_INSTANCE: ${{ inputs.TARGET_INSTANCE }}
+          GHEC_CLOUD_TOKEN: ${{ secrets.GHEC_CLOUD_TOKEN }}
+          GHES_PROD_TOKEN: ${{ secrets.GHES_PROD_TOKEN }}
+          GHEC_EMU_TOKEN: ${{ secrets.GHEC_EMU_TOKEN }}
+        with:
+          script: |
+            const script = require('./.github/scripts/config/resolve-tokens.js');
+            return await script({core});
+
+  prepare-migration-batches:
+    name: Prepare Migration Batches
+    runs-on: ${{ inputs.RUNNER }}
+    outputs:
+      batches: ${{ steps.create-batches.outputs.batches }}
+      migration_id: ${{ steps.generate-id.outputs.id }}
+      batch_count: ${{ steps.create-batches.outputs.batch_count }}
+      migration_type: ${{ steps.determine-type.outputs.type }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Extract migration parameters from issue
+        id: parse-issue-body
+        uses: stefanbuck/github-issue-parser@v3
+        
+      - name: Create unique migration identifier
+        id: generate-id
+        run: echo "id=${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_OUTPUT
+        
+      - name: Set migration mode (dry-run/production)
+        id: determine-type
+        run: |
+          echo "type=${{ inputs.MIGRATION_TYPE }}" >> $GITHUB_OUTPUT
+
+      - name: Debug - Show inputs
+        run: |
+          echo "=== ORCHESTRATOR INPUTS ==="
+          echo "SOURCE_ORG: ${{ inputs.SOURCE_ORG }}"
+          echo "TARGET_ORG: ${{ inputs.TARGET_ORG }}"
+          echo "REPOSITORY_URLS length: ${{ inputs.REPOSITORY_URLS }}"
+          echo "=== END ==="
+
+      - name: Split repositories into batches of ${{ inputs.BATCH_SIZE }}
+        id: create-batches
+        uses: actions/github-script@v8
+        with:
+          script: |
+            console.log('=== CREATE BATCHES DEBUG ===');
+            console.log('REPOS env var:', process.env.REPOS?.substring(0, 200));
+            console.log('SOURCE_ORG:', process.env.SOURCE_ORG);
+            console.log('TARGET_ORG:', process.env.TARGET_ORG);
+            console.log('=== END DEBUG ===');
+            
+            const script = require('./.github/scripts/orchestration/create-batches.js');
+            return await script({context, core});
+        env:
+          REPOS: ${{ inputs.REPOSITORY_URLS }}
+          BATCH_SIZE: ${{ inputs.BATCH_SIZE }}
+          MIGRATION_ID: ${{ steps.generate-id.outputs.id }}
+          MIGRATION_TYPE: ${{ inputs.MIGRATION_TYPE }}
+          SOURCE_ORG: ${{ inputs.SOURCE_ORG }}
+          TARGET_ORG: ${{ inputs.TARGET_ORG }}
+          SOURCE_INSTANCE: ${{ inputs.SOURCE_INSTANCE }}
+          TARGET_INSTANCE: ${{ inputs.TARGET_INSTANCE }}
+          VISIBILITY: ${{ fromJSON(steps.parse-issue-body.outputs.jsonString)._target_repository_visibility }}
+          INSTALL_PREREQS: ${{ inputs.INSTALL_PREREQS }}
+            
+      - name: Post migration start notification
+        uses: actions/github-script@v8
+        env:
+          MIGRATION_TYPE: ${{ inputs.MIGRATION_TYPE }}
+          BATCH_COUNT: ${{ steps.create-batches.outputs.batch_count }}
+          BATCH_SIZE: ${{ inputs.BATCH_SIZE }}
+          TOTAL_REPOS: ${{ steps.create-batches.outputs.total_repos }}
+          TARGET_ORG: ${{ inputs.TARGET_ORG }}
+        with:
+          script: |
+            const script = require('./.github/scripts/reporting/start-migration.js');
+            return await script({github, context});
+
+  orchestrate-batch-execution:
+    name: Orchestrate sequential batch execution
+    needs: [prepare-migration-batches, resolve-tokens]
+    if: always() && needs.prepare-migration-batches.result == 'success'
+    runs-on: ${{ inputs.RUNNER }}
+    timeout-minutes: 50400
+    steps:
+      - uses: actions/checkout@v4
+      - name: Orchestrate sequential batch execution
+        uses: actions/github-script@v8
+        env:
+          BATCHES: ${{ needs.prepare-migration-batches.outputs.batches }}
+          TARGET_INSTANCE: ${{ inputs.TARGET_INSTANCE }}
+          GHEC_CLOUD_TOKEN: ${{ secrets.GHEC_CLOUD_TOKEN }}
+          GHES_PROD_TOKEN: ${{ secrets.GHES_PROD_TOKEN }}
+          GHEC_EMU_TOKEN: ${{ secrets.GHEC_EMU_TOKEN }}
+        with:
+          script: |
+            const script = require('./.github/scripts/orchestration/orchestrate.js');
+            return await script({github, context});
+
+  post-migration-summary:
+    name: Post Migration Summary
+    needs: [prepare-migration-batches, orchestrate-batch-execution]
+    runs-on: ${{ inputs.RUNNER }}
+    if: always() && needs.prepare-migration-batches.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate special features migration report
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const script = require('./.github/scripts/reporting/feature-report.js');
+            const hasFeatures = await script({github, context, core});
+            
+            if (!hasFeatures) {
+              console.log('No special features (LFS/packages/releases) were migrated');
+            } else {
+              console.log('Special features report posted to issue');
+            }
+      
+      - name: Post migration completion summary
+        uses: actions/github-script@v8
+        env:
+          BATCH_COUNT: ${{ needs.prepare-migration-batches.outputs.batch_count }}
+          MIGRATION_TYPE: ${{ needs.prepare-migration-batches.outputs.migration_type }}
+          TARGET_ORG: ${{ inputs.TARGET_ORG }}
+        with:
+          script: |
+            const script = require('./.github/scripts/reporting/final-report.js');
+            return await script({github, context});

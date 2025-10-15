@@ -1,0 +1,94 @@
+name: Delete Migrated Repositories
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  parse-issue:
+    name: Parse Issue
+    runs-on: ubuntu-latest
+    outputs:
+      target_instance: ${{ steps.parse.outputs.target_instance }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Extract data from issue
+        id: parse
+        uses: stefanbuck/github-issue-parser@v3
+        
+      - name: Set target instance output
+        run: echo "target_instance=${{ fromJSON(steps.parse.outputs.jsonString)._target_instance }}" >> $GITHUB_OUTPUT
+
+  resolve-tokens:
+    name: Resolve Tokens
+    needs: parse-issue
+    uses: ./.github/workflows/resolve-tokens-reusable.yml
+    with:
+      target_instance: ${{ needs.parse-issue.outputs.target_instance }}
+    secrets: inherit
+
+  delete-repositories:
+    name: Delete Repositories from Target Organization
+    runs-on: ubuntu-latest
+    needs: resolve-tokens
+    
+    if: |
+      (contains(github.event.comment.body, '/delete-repositories') || 
+       contains(github.event.comment.body, '/delete-dry-run')) &&
+      (github.event.comment.author_association == 'OWNER' || 
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Extract repositories from issue
+        id: parse-issue-body
+        uses: stefanbuck/github-issue-parser@v3
+      
+      - name: Prepare deletion confirmation
+        id: prepare
+        uses: actions/github-script@v8
+        env:
+          REPOSITORIES_JSON: ${{ steps.parse-issue-body.outputs.jsonString }}
+          TARGET_ORG: ${{ vars.TARGET_ORGANIZATION }}
+          IS_DRY_RUN: ${{ contains(github.event.comment.body, 'dry-run') }}
+        with:
+          script: |
+            const script = require('./.github/scripts/cleanup/prepare.js');
+            return await script({github, context, core});
+            
+      - name: Wait for confirmation
+        id: wait-confirm
+        if: steps.prepare.outputs.repo_count != '0'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const script = require('./.github/scripts/cleanup/wait.js');
+            return await script({github, context, core});
+            
+      - name: Execute repository deletion
+        if: steps.wait-confirm.outputs.confirmed == 'true'
+        uses: actions/github-script@v8
+        env:
+          TARGET_TOKEN: ${{ needs.resolve-tokens.outputs.target_token }}
+          TARGET_ORG: ${{ vars.TARGET_ORGANIZATION }}
+          REPO_NAMES: ${{ steps.prepare.outputs.repo_names }}
+          IS_DRY_RUN: ${{ contains(github.event.comment.body, 'dry-run') }}
+        with:
+          script: |
+            const script = require('./.github/scripts/cleanup/execute.js');
+            return await script({github, context, core});

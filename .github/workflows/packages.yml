@@ -1,0 +1,118 @@
+name: Migrate Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repo to migrate packages'
+        required: true
+        type: string
+      source_token:
+        description: 'Source instance token (masked)'
+        required: true
+        type: string
+      target_token:
+        description: 'Target instance token (masked)'
+        required: true
+        type: string
+      issue_number:
+        description: 'Issue number for reporting'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number for context'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  packages: write
+
+jobs:
+  migrate-packages:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Extract repository name
+      id: repo-info
+      run: |
+        REPO_NAME=$(basename "${{ inputs.repository }}")
+        echo "name=$REPO_NAME" >> $GITHUB_OUTPUT
+    
+    - name: Report packages migration start
+      if: ${{ inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          const message = [
+            '### 📦 Package Migration Starting',
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            'Migrating packages (npm, Maven, NuGet, etc.) to the target repository...'
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });
+    
+    - name: Install gh migrate-packages extension
+      run: gh extension install mona-actions/gh-migrate-packages
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+
+    - name: Migrate packages to target repository
+      id: migrate
+      run: |
+        gh migrate-packages sync \
+          --migration-path "${{ env.LOCAL_CACHE_DIR }}/packages" \
+          --repository ${{ steps.repo-info.outputs.name }} \
+          --source-organization ${{ vars.SOURCE_ORGANIZATION }} \
+          --target-organization ${{ vars.TARGET_ORGANIZATION }} \
+          --target-token ${{ inputs.target_token }}
+        
+        echo "packages_status=success" >> $GITHUB_OUTPUT
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+        LOCAL_CACHE_DIR: ${{ vars.LOCAL_CACHE_DIR || '/opt/migration' }}
+    
+    - name: Report packages migration completion
+      if: ${{ always() && inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const success = '${{ steps.migrate.outputs.packages_status }}' === 'success';
+          const icon = success ? '✅' : '❌';
+          const status = success ? 'completed successfully' : 'failed';
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          const statusMessage = success 
+            ? '✅ All packages have been migrated to the target repository.' 
+            : '⚠️ Please check the workflow logs for error details.';
+          
+          const message = [
+            `### ${icon} Package Migration ${status}`,
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            statusMessage
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });

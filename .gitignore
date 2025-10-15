@@ -1,0 +1,24 @@
+# Temporary files created during migrations
+*.csv
+
+# Node modules (if any local testing)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Migration artifacts (should be in /opt/migration)
+*_lfs.csv
+*_environments.csv
+lfs-repos.csv

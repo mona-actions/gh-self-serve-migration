@@ -1,0 +1,102 @@
+name: Repos Migration (Prepare)
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  validate-and-initialize-issue:
+    name: Prepare Repos Migration
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'issues' &&
+      (github.event.action == 'opened' || github.event.action == 'edited') &&
+      contains(github.event.issue.labels.*.name, 'migration') &&
+      contains(github.event.issue.labels.*.name, 'batch') &&
+      !contains(github.event.issue.labels.*.name, 'gei-org')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract repositories and settings from issue
+        id: parse-issue-body
+        uses: stefanbuck/github-issue-parser@v3
+
+      - name: "Debug: Display parsed issue data"
+        run: echo $JSON_STRING
+        env:
+          JSON_STRING: ${{ steps.parse-issue-body.outputs.jsonString }}
+      
+      # NEW STEP: Filter organizations by instance and user
+      - name: Filter organizations by instance and user
+        id: filter-orgs
+        uses: actions/github-script@v8
+        env:
+          SOURCE_INSTANCE: ${{ fromJSON(steps.parse-issue-body.outputs.jsonString)._source_instance }}
+          TARGET_INSTANCE: ${{ fromJSON(steps.parse-issue-body.outputs.jsonString)._target_instance }}
+        with:
+          script: |
+            const script = require('./.github/scripts/config/filter-orgs-by-instance.js');
+            return await script({github, context, core});
+
+      # NEW STEP: Deny access if unauthorized
+      - name: Deny access if unauthorized
+        if: steps.filter-orgs.outputs.has_access == 'false'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### ❌ Access Denied\n\n@${context.payload.issue.user.login}, you don't have access to any organizations in the selected instances.\n\n**Selected:**\n- Source: ${process.env.SOURCE_INSTANCE}\n- Target: ${process.env.TARGET_INSTANCE}\n\nContact your administrator to request access.`
+            });
+            
+            await github.rest.issues.update({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'closed',
+              state_reason: 'not_planned'
+            });
+            
+            core.setFailed('User does not have access');
+        env:
+          SOURCE_INSTANCE: ${{ steps.filter-orgs.outputs.source_instance }}
+          TARGET_INSTANCE: ${{ steps.filter-orgs.outputs.target_instance }}
+
+      # NEW STEP: Post organization checkboxes
+      - name: Post organization selection checkboxes
+        if: steps.filter-orgs.outputs.has_access == 'true'
+        uses: actions/github-script@v8
+        env:
+          SOURCE_INSTANCE: ${{ steps.filter-orgs.outputs.source_instance }}
+          SOURCE_HOSTNAME: ${{ steps.filter-orgs.outputs.source_hostname }}
+          SOURCE_ORGS: ${{ steps.filter-orgs.outputs.source_orgs }}
+          TARGET_INSTANCE: ${{ steps.filter-orgs.outputs.target_instance }}
+          TARGET_HOSTNAME: ${{ steps.filter-orgs.outputs.target_hostname }}
+          TARGET_ORGS: ${{ steps.filter-orgs.outputs.target_orgs }}
+        with:
+          script: |
+            const script = require('./.github/scripts/reporting/post-org-selection.js');
+            return await script({github, context});
+
+      - name: Report issue parsing error
+        if: ${{ failure() }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            let commentBody
+            commentBody = `😢 The issue body could not be parsed. Please edit the issue body or open a new issue using an issue template.`
+            await github.rest.issues.createComment({
+              issue_number: ${{ github.event.issue.number }},
+              owner: '${{ github.REPOSITORY_OWNER }}',
+              repo: '${{ github.event.repository.name }}',
+              body: commentBody
+            })

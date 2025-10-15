@@ -1,0 +1,159 @@
+name: Migrate Environments
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository to migrate environments from'
+        required: true
+        type: string
+      source_token:
+        description: 'Source instance token (masked)'
+        required: true
+        type: string
+      target_token:
+        description: 'Target instance token (masked)'
+        required: true
+        type: string
+      issue_number:
+        description: 'Issue number for reporting'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number for context'
+        required: true
+        type: string
+      file_name:
+        description: 'File name to migrate environments from'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  migrate-environments:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Extract repository name
+      id: repo-info
+      run: |
+        REPO_NAME=$(basename "${{ inputs.repository }}")
+        echo "name=$REPO_NAME" >> $GITHUB_OUTPUT
+    
+    - name: Report environments migration start
+      if: ${{ inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          const message = [
+            '### 🌍 Environments Migration Starting',
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            'Migrating deployment environments and protection rules to the target repository...'
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });
+    
+    # - name: Install gh migrate-environments extension
+    #   run: gh extension install mona-actions/gh-migrate-environments
+    #   env:
+    #     GH_TOKEN: ${{ secrets.TARGET_ADMIN_TOKEN }}
+
+    - name: Sync environments to target repository
+      id: sync
+      run: |
+        set +e  # Don't exit on error
+        
+        CSV_FILE="${{ inputs.file_name }}"
+        
+        if [ -f "$CSV_FILE" ]; then
+          # Sync environments to target organization
+          gh migrate-environments sync \
+            --file "$CSV_FILE" \
+            --organization ${{ vars.TARGET_ORGANIZATION }} \
+            --repository ${{ steps.repo-info.outputs.name }} \
+            --token ${{ inputs.target_token }}
+          
+          SYNC_EXIT_CODE=$?
+          
+          if [ $SYNC_EXIT_CODE -eq 0 ]; then
+            echo "sync_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "sync_status=failed" >> $GITHUB_OUTPUT
+            echo "sync_error_code=$SYNC_EXIT_CODE" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "sync_status=skipped" >> $GITHUB_OUTPUT
+          echo "No CSV file found to sync"
+        fi
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+    
+    - name: Report environments migration completion
+      if: ${{ always() && inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const syncStatus = '${{ steps.sync.outputs.sync_status }}';
+          const syncErrorCode = '${{ steps.sync.outputs.sync_error_code }}';
+          
+          let success = false;
+          let icon = '❌';
+          let status = 'failed';
+          
+          if (syncStatus === 'success' || syncStatus === 'skipped') {
+            success = true;
+            icon = '✅';
+            status = 'completed successfully';
+          } else if (syncStatus === 'failed') {
+            icon = '❌';
+            status = 'failed';
+          }
+          
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          let statusMessage = '';
+          if (success) {
+            if (syncStatus === 'skipped') {
+              statusMessage = 'No environment CSV file found to migrate.';
+            } else {
+              statusMessage = 'Successfully migrated environments with their protection rules and deployment policies.';
+            }
+          } else {
+            statusMessage = '⚠️ Please check the workflow logs for error details.';
+            if (syncErrorCode) {
+              statusMessage += `\n**Sync Error Code:** ${syncErrorCode}`;
+            }
+          }
+          
+          const message = [
+            `### ${icon} Environments Migration ${status}`,
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            statusMessage
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });

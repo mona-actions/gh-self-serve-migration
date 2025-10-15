@@ -1,0 +1,130 @@
+name: Migrate LFS Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repo to LFS migrate'
+        required: true
+        type: string
+      source_org:
+        description: 'Source organization name'
+        required: true
+        type: string
+      source_token:
+        description: 'Source instance token (masked)'
+        required: true
+        type: string
+      target_token:
+        description: 'Target instance token (masked)'
+        required: true
+        type: string
+      issue_number:
+        description: 'Issue number for reporting'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number for context'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  migrate-lfs:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Extract repository name
+      id: repo-info
+      run: |
+        REPO_NAME=$(basename "${{ inputs.repository }}")
+        echo "name=$REPO_NAME" >> $GITHUB_OUTPUT
+    
+    - name: Report LFS migration start
+      if: ${{ inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          const message = [
+            '### 📦 LFS Migration Starting',
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            'Migrating Git LFS objects to the target repository...'
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });
+    
+    - name: Install gh migrate-lfs extension
+      run: gh extension install mona-actions/gh-migrate-lfs
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+
+    - name: Prepare LFS migration
+      id: prepare
+      env:
+        CLONE_URL: ${{ inputs.repository }}.git
+        LFS_CSV_PATH: ${{ vars.LOCAL_CACHE_DIR || '/opt/migration' }}/${{ inputs.source_org }}_lfs.csv
+        LOCAL_CACHE_DIR: ${{ vars.LOCAL_CACHE_DIR || '/opt/migration' }}
+      run: |
+          node .github/scripts/filters/lfs.js extract 
+          REPO_NAME=$(basename "${{ inputs.repository }}")
+          echo "csv_file=${REPO_NAME}.csv" >> $GITHUB_OUTPUT
+    
+    - name: Migrate LFS objects to target repository
+      id: migrate
+      run: |
+        gh migrate-lfs sync \
+          --file ${{ steps.prepare.outputs.csv_file }} \
+          --target-organization ${{ vars.TARGET_ORGANIZATION }} \
+          --target-token ${{ inputs.target_token }} \
+          --work-dir ${{ vars.LOCAL_CACHE_DIR }}/lfs
+        
+        echo "lfs_status=success" >> $GITHUB_OUTPUT
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+    
+    - name: Report LFS migration completion
+      if: ${{ always() && inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const success = '${{ steps.migrate.outputs.lfs_status }}' === 'success';
+          const icon = success ? '✅' : '❌';
+          const status = success ? 'completed successfully' : 'failed';
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          const statusMessage = success 
+            ? '✅ All Git LFS objects have been migrated to the target repository.' 
+            : '⚠️ Please check the workflow logs for error details.';
+          
+          const message = [
+            `### ${icon} LFS Migration ${status}`,
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            statusMessage
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });

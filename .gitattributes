@@ -1,0 +1,52 @@
+# Git Attributes for Framework Update Strategy
+# 
+# This file controls how git handles merges when pulling framework updates.
+# It protects your custom configuration while allowing framework improvements.
+
+# ===================================================================
+# ALWAYS KEEP YOUR VERSION (merge=ours)
+# These files contain your specific configuration and should never be
+# overwritten by upstream updates.
+# ===================================================================
+
+# Your instance configuration (CRITICAL - protects your setup)
+.github/scripts/config/instances.json merge=ours
+
+# ===================================================================
+# ALWAYS TAKE UPSTREAM VERSION (merge=theirs)
+# These are core framework files that should always be updated to
+# the latest version from upstream.
+# ===================================================================
+
+# Framework scripts
+.github/scripts/**/*.js merge=theirs
+
+# Workflow definitions
+.github/workflows/*.yml merge=theirs
+
+# Core documentation
+README.md merge=theirs
+
+# ===================================================================
+# MERGE NORMALLY (union or default)
+# Documentation files you might customize with notes or examples.
+# ===================================================================
+
+SETUP.md merge=union
+USAGE.md merge=union
+UPDATING.md merge=union
+
+# ===================================================================
+# CONFIGURATION NOTES
+# ===================================================================
+# 
+# To use this configuration, ensure git merge drivers are set up:
+#   git config merge.ours.driver true
+#   git config merge.theirs.driver "git merge-file --theirs %O %A %B %A"
+#
+# These are automatically configured when you follow UPDATING.md
+# 
+# To add custom files that should be protected:
+#   echo "path/to/your-file.js merge=ours" >> .gitattributes
+#   git add .gitattributes
+#   git commit -m "Protect custom file from upstream updates"

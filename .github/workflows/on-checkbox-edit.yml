@@ -1,0 +1,130 @@
+name: Handle Org Selection
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate-and-post-next-step:
+    if: |
+      contains(github.event.issue.labels.*.name, 'migration') &&
+      contains(github.event.issue.labels.*.name, 'batch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Debug - Check workflow trigger
+        uses: actions/github-script@v8
+        with:
+          script: |
+            console.log('=== WORKFLOW TRIGGERED ===');
+            console.log('Event:', context.eventName);
+            console.log('Action:', context.payload.action);
+            console.log('Issue labels:', context.payload.issue.labels.map(l => l.name));
+            console.log('Has migration label:', context.payload.issue.labels.some(l => l.name === 'migration'));
+            console.log('Has batch label:', context.payload.issue.labels.some(l => l.name === 'batch'));
+            console.log('=== END ===');
+      
+      - name: Debug - Show comment info
+        uses: actions/github-script@v8
+        with:
+          script: |
+            console.log('=== DEBUG: Comment Event ===');
+            console.log('Action:', context.payload.action);
+            console.log('Actor (who triggered):', context.actor);
+            console.log('Comment author:', context.payload.comment.user.login);
+            console.log('Comment author type:', context.payload.comment.user.type);
+            console.log('Comment ID:', context.payload.comment.id);
+            console.log('Has checkboxes:', context.payload.comment.body.includes('- ['));
+            console.log('Comment preview (first 500 chars):');
+            console.log(context.payload.comment.body.substring(0, 500));
+            console.log('=== END DEBUG ===');
+      
+      - name: Validate checkbox selection
+        id: validate
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { validateCheckboxSelection } = require('./.github/scripts/config/validate.js');
+            return await validateCheckboxSelection({github, context, core});
+      
+      - name: Debug validation outputs
+        if: always()
+        run: |
+          echo "is_org_comment: ${{ steps.validate.outputs.is_org_comment }}"
+          echo "is_valid: ${{ steps.validate.outputs.is_valid }}"
+          echo "source_instance: ${{ steps.validate.outputs.source_instance }}"
+          echo "source_org: ${{ steps.validate.outputs.source_org }}"
+          echo "target_instance: ${{ steps.validate.outputs.target_instance }}"
+          echo "target_org: ${{ steps.validate.outputs.target_org }}"
+
+      - name: Post Step 3 if valid selection
+        if: |
+          steps.validate.outputs.is_org_comment == 'true' &&
+          steps.validate.outputs.is_valid == 'true'
+        uses: actions/github-script@v8
+        env:
+          SOURCE_INSTANCE: ${{ steps.validate.outputs.source_instance }}
+          SOURCE_ORG: ${{ steps.validate.outputs.source_org }}
+          SOURCE_HOSTNAME: ${{ steps.validate.outputs.source_hostname }}
+          TARGET_INSTANCE: ${{ steps.validate.outputs.target_instance }}
+          TARGET_ORG: ${{ steps.validate.outputs.target_org }}
+          TARGET_HOSTNAME: ${{ steps.validate.outputs.target_hostname }}
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const step3Exists = comments.data.some(c => 
+              c.body.includes('Step 3: Provide Repository URLs')
+            );
+            
+            if (step3Exists) {
+              console.log('Step 3 already posted');
+              return;
+            }
+            
+            const state = {
+              sourceInstance: process.env.SOURCE_INSTANCE,
+              sourceOrg: process.env.SOURCE_ORG,
+              sourceHostname: process.env.SOURCE_HOSTNAME,
+              targetInstance: process.env.TARGET_INSTANCE,
+              targetOrg: process.env.TARGET_ORG,
+              targetHostname: process.env.TARGET_HOSTNAME,
+              timestamp: new Date().toISOString()
+            };
+            
+            // Build JSON block properly (avoiding backtick escaping issues)
+            const jsonBlock = '```json\n' + JSON.stringify(state, null, 2) + '\n```';
+            
+            // Post confirmation with JSON
+            const commentBody = `### ✅ Organizations Selected
+
+              **Source:** \`${state.sourceOrg}\` @ \`${state.sourceHostname}\`
+              **Target:** \`${state.targetOrg}\` @ \`${state.targetHostname}\`
+
+              <details>
+              <summary>📊 Configuration Data</summary>
+
+              ${jsonBlock}
+
+              </details>
+
+              📋 Proceed to Step 3 below to provide your repository URLs.`;
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+
+            const script = require('./.github/scripts/reporting/post-next-steps.js');
+            await script({github, context});

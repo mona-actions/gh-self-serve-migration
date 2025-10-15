@@ -1,0 +1,135 @@
+name: Migrate Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Repository to migrate releases from'
+        required: true
+        type: string
+      source_token:
+        description: 'Source instance token (masked)'
+        required: true
+        type: string
+      target_token:
+        description: 'Target instance token (masked)'
+        required: true
+        type: string
+      issue_number:
+        description: 'Issue number for reporting'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number for context'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  migrate-releases:
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Extract repository name
+      id: repo-info
+      run: |
+        REPO_NAME=$(basename "${{ inputs.repo }}")
+        echo "name=$REPO_NAME" >> $GITHUB_OUTPUT
+    
+    - name: Report releases migration start
+      if: ${{ inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          
+          const message = [
+            '### 🏷️ Releases Migration Starting',
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            'Migrating releases and tags to the target repository...'
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });
+    
+    - name: Install gh migrate-releases extension
+      run: gh extension install mona-actions/gh-migrate-releases
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+
+    - name: Migrate releases to target repository
+      id: migrate
+      run: |
+        set +e  # Don't exit on error
+        
+        # Run the actual migration (uncomment for production)
+        gh migrate-releases sync \
+          --repository ${{ inputs.repo }} \
+          --source-organization ${{ vars.SOURCE_ORGANIZATION }} \
+          --source-token ${{ inputs.source_token }} \
+          --target-organization ${{ vars.TARGET_ORGANIZATION }} \
+          --target-token ${{ inputs.target_token }}
+        
+        # Capture exit code
+        MIGRATION_EXIT_CODE=$?
+        
+        if [ $MIGRATION_EXIT_CODE -eq 0 ]; then
+          echo "releases_status=success" >> $GITHUB_OUTPUT
+          echo "releases_count=unknown" >> $GITHUB_OUTPUT
+        else
+          echo "releases_status=failed" >> $GITHUB_OUTPUT
+          echo "error_code=$MIGRATION_EXIT_CODE" >> $GITHUB_OUTPUT
+        fi
+        
+        exit $MIGRATION_EXIT_CODE
+      env:
+        GH_TOKEN: ${{ inputs.target_token }}
+    
+    - name: Report releases migration completion
+      if: ${{ always() && inputs.issue_number != '' }}
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const success = '${{ steps.migrate.outputs.releases_status }}' === 'success';
+          const icon = success ? '✅' : '❌';
+          const status = success ? 'completed successfully' : 'failed';
+          const batchInfo = context.payload.inputs.batch_number ? 
+            `**Batch:** ${context.payload.inputs.batch_number}` : '';
+          const errorCode = '${{ steps.migrate.outputs.error_code }}';
+          
+          let statusMessage = success 
+            ? 'All releases and tags have been migrated to the target repository.' 
+            : '⚠️ Please check the workflow logs for error details.';
+          
+          if (!success && errorCode) {
+            statusMessage += `\n**Error Code:** ${errorCode}`;
+          }
+          
+          const message = [
+            `### ${icon} Releases Migration ${status}`,
+            '',
+            `**Repository:** \`${{ steps.repo-info.outputs.name }}\``,
+            batchInfo,
+            '',
+            statusMessage
+          ].filter(line => line !== '').join('\n');
+          
+          await github.rest.issues.createComment({
+            issue_number: ${{ inputs.issue_number }},
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          })

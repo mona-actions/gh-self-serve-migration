@@ -1,0 +1,301 @@
+name: Migration Batch Processor
+run-name: "Migration Batch ${{ github.event.client_payload.batch.batchNumber }} - ID:${{ github.event.client_payload.batch.batchId }}"
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+on:
+  repository_dispatch:
+    types: [migration-batch]
+
+jobs:
+  process-repository-migrations:
+    name: Batch ${{ github.event.client_payload.batch.batchNumber }} - ${{ matrix.repository }}
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        repository: ${{ github.event.client_payload.batch.repositories }}
+      fail-fast: false
+      max-parallel: 10
+    timeout-minutes: 50400
+    
+    env:
+      TARGET_ORG: ${{ github.event.client_payload.batch.targetOrganization }}
+      SOURCE_ORG: ${{ github.event.client_payload.batch.sourceOrganization }}
+      SOURCE_INSTANCE: ${{ github.event.client_payload.batch.sourceInstance }}
+      TARGET_INSTANCE: ${{ github.event.client_payload.batch.targetInstance }}
+      BATCH_NUMBER: ${{ github.event.client_payload.batch.batchNumber }}
+      MIGRATION_TYPE: ${{ github.event.client_payload.batch.migrationType }}
+      VISIBILITY: ${{ github.event.client_payload.batch.targetRepositoryVisibility }}
+      TOTAL_BATCHES: ${{ github.event.client_payload.batch.totalBatches }}
+      ORCHESTRATOR_RUN_ID: ${{ github.event.client_payload.orchestrator_run_id }}
+      INSTALL_PREREQS: ${{ github.event.client_payload.batch.installPrereqs || 'false' }}
+      REPOSITORY: ${{ matrix.repository }}
+      BATCH_ID: ${{ github.event.client_payload.batch.batchId }}
+      # Pass all tokens for dynamic resolution
+      GHEC_CLOUD_TOKEN: ${{ secrets.GHEC_CLOUD_TOKEN }}
+      GHES_PROD_TOKEN: ${{ secrets.GHES_PROD_TOKEN }}
+      GHEC_EMU_TOKEN: ${{ secrets.GHEC_EMU_TOKEN }}
+      
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve tokens for source and target instances
+        id: resolve-tokens
+        uses: actions/github-script@v8
+        env:
+          SOURCE_INSTANCE: ${{ github.event.client_payload.batch.sourceInstance }}
+          TARGET_INSTANCE: ${{ github.event.client_payload.batch.targetInstance }}
+        with:
+          script: |
+            const resolveTokens = require('./.github/scripts/config/resolve-tokens.js');
+            await resolveTokens({ core });
+
+      - name: Extract repository name and path
+        id: repo-info
+        run: |
+          REPO_NAME=$(basename "${{ matrix.repository }}")
+          REPO_PATH=$(echo "${{ matrix.repository }}" | sed -E 's#https?://[^/]+/##')
+          echo "name=$REPO_NAME" >> $GITHUB_OUTPUT
+          echo "path=$REPO_PATH" >> $GITHUB_OUTPUT
+
+      - name: Install GEI prerequisites
+        if: env.INSTALL_PREREQS == 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            git unzip curl wget apt-transport-https software-properties-common
+          
+          if ! command -v gei &> /dev/null; then
+            wget -q https://github.com/github/gh-gei/releases/latest/download/gei-linux-amd64
+            sudo install --owner root --group root --mode 755 gei-linux-amd64 /usr/local/bin/gei
+          fi
+          
+          echo "GEI Version: $(gei --version)"
+
+      - name: Execute GEI migration for ${{ matrix.repository }}
+        id: migrate
+        run: |
+          ARGS=(
+            ".github/scripts/migration/gei-migrate.js"
+            "--repository" "$REPOSITORY"
+            "--target-org" "$TARGET_ORG"
+            "--visibility" "$VISIBILITY"
+            "--migration-type" "$MIGRATION_TYPE"
+            "--batch-number" "$BATCH_NUMBER"
+            "--total-batches" "$TOTAL_BATCHES"
+          )
+          
+          # Add lock flag for production migrations
+          if [[ "$MIGRATION_TYPE" == "production" ]]; then
+            ARGS+=("--lock-source-repo")
+          fi
+          
+          node "${ARGS[@]}"
+        env:
+          GH_PAT: ${{ steps.resolve-tokens.outputs.target_token }}
+          GH_SOURCE_PAT: ${{ steps.resolve-tokens.outputs.source_token }}
+
+      - name: Detect features requiring additional migration steps
+        id: migration-checks
+        env:
+          LOCAL_CACHE_DIR: ${{ vars.LOCAL_CACHE_DIR || '/opt/migration' }}                           
+        run: |
+          # Check and collect secrets
+          SECRETS_JSON=$(GH_TOKEN="${{ steps.resolve-tokens.outputs.source_token }}" gh secret list \
+            --repo "${{ steps.repo-info.outputs.path }}" \
+            --json name,updatedAt 2>/dev/null || echo "[]")
+
+          if [ "$(echo "$SECRETS_JSON" | jq -r 'length')" -gt 0 ]; then
+            echo "has_secrets=true" >> $GITHUB_OUTPUT
+            # Store as base64 to handle special characters and multiline
+            echo "secrets_data=$(echo "$SECRETS_JSON" | base64 -w 0)" >> $GITHUB_OUTPUT
+          else
+            echo "has_secrets=false" >> $GITHUB_OUTPUT
+            echo "secrets_data=" >> $GITHUB_OUTPUT
+          fi
+
+          # Check and collect variables
+          VARIABLES_JSON=$(GH_TOKEN="${{ steps.resolve-tokens.outputs.source_token }}" gh variable list \
+            --repo "${{ steps.repo-info.outputs.path }}" \
+            --json name,value 2>/dev/null || echo "[]")
+
+          if [ "$(echo "$VARIABLES_JSON" | jq -r 'length')" -gt 0 ]; then
+            echo "has_variables=true" >> $GITHUB_OUTPUT
+            # Store as base64 to handle special characters and multiline
+            echo "variables_data=$(echo "$VARIABLES_JSON" | base64 -w 0)" >> $GITHUB_OUTPUT
+          else
+            echo "has_variables=false" >> $GITHUB_OUTPUT
+            echo "variables_data=" >> $GITHUB_OUTPUT
+          fi
+
+          # Check LFS
+          if CLONE_URL="${{ matrix.repository }}.git" LFS_CSV_PATH="$LOCAL_CACHE_DIR/${{ env.SOURCE_ORG }}_lfs.csv" node .github/scripts/filters/lfs.js check | grep -q "found=true"; then
+            echo "lfs=true" >> $GITHUB_OUTPUT
+          else
+            echo "lfs=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check packages
+          if cat $LOCAL_CACHE_DIR/packages/export/*/*.csv  | tail -n+2 | cut -d, -f2 | sort -u | grep -q "${{ steps.repo-info.outputs.name }}"; then
+            echo "packages=true" >> $GITHUB_OUTPUT
+          else
+            echo "packages=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check releases
+          RELEASES_DIR="$LOCAL_CACHE_DIR/releases/${{ steps.repo-info.outputs.path }}"
+          if [ -d "$RELEASES_DIR" ]; then
+            echo "releases=true" >> $GITHUB_OUTPUT
+          else
+            echo "releases=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Check environments
+          if cat $LOCAL_CACHE_DIR/${{ env.SOURCE_ORG }}_environments.csv | tail -n+2 | cut -d, -f2 | sort -u | grep -q "${{ steps.repo-info.outputs.name }}"; then
+            echo "environments=true" >> $GITHUB_OUTPUT
+          else
+            echo "environments=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Trigger variables and secrets migration
+        if: steps.migration-checks.outputs.has_variables == 'true' || steps.migration-checks.outputs.has_secrets == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: variables-secrets.yml
+          token: ${{ steps.resolve-tokens.outputs.target_token }}
+          inputs: |
+            {
+              "repository": "${{ matrix.repository }}",
+              "target_repo": "${{ env.TARGET_ORG }}/${{ steps.repo-info.outputs.name }}",
+              "source_token": "${{ steps.resolve-tokens.outputs.source_token }}",
+              "target_token": "${{ steps.resolve-tokens.outputs.target_token }}",
+              "variables_data": "${{ steps.migration-checks.outputs.variables_data }}",
+              "secrets_data": "${{ steps.migration-checks.outputs.secrets_data }}",
+              "issue_number": "${{ github.event.client_payload.batch.issueNumber }}",
+              "batch_number": "${{ env.BATCH_NUMBER }}"
+            }
+
+      - name: Trigger LFS data migration
+        if: steps.migration-checks.outputs.lfs == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: lfs.yml
+          token: ${{ steps.resolve-tokens.outputs.target_token }}
+          inputs: |
+            {
+              "repository": "${{ matrix.repository }}",
+              "source_org": "${{ env.SOURCE_ORG }}",
+              "source_token": "${{ steps.resolve-tokens.outputs.source_token }}",
+              "target_token": "${{ steps.resolve-tokens.outputs.target_token }}",
+              "issue_number": "${{ github.event.client_payload.batch.issueNumber }}",
+              "batch_number": "${{ env.BATCH_NUMBER }}"
+            }
+
+      - name: Trigger packages data migration
+        if: steps.migration-checks.outputs.packages == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: packages.yml
+          token: ${{ steps.resolve-tokens.outputs.target_token }}
+          inputs: |
+            {
+              "repository": "${{ matrix.repository }}",
+              "source_token": "${{ steps.resolve-tokens.outputs.source_token }}",
+              "target_token": "${{ steps.resolve-tokens.outputs.target_token }}",
+              "issue_number": "${{ github.event.client_payload.batch.issueNumber }}",
+              "batch_number": "${{ env.BATCH_NUMBER }}"
+            }
+
+      - name: Trigger releases data migration
+        if: steps.migration-checks.outputs.releases == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: releases.yml
+          token: ${{ steps.resolve-tokens.outputs.target_token }}
+          inputs: |
+            {
+              "repo": "${{ steps.repo-info.outputs.path }}",
+              "source_token": "${{ steps.resolve-tokens.outputs.source_token }}",
+              "target_token": "${{ steps.resolve-tokens.outputs.target_token }}",
+              "issue_number": "${{ github.event.client_payload.batch.issueNumber }}",
+              "batch_number": "${{ env.BATCH_NUMBER }}"
+            }
+
+      - name: Trigger environments data migration
+        if: steps.migration-checks.outputs.environments == 'true'
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: environments.yml
+          token: ${{ steps.resolve-tokens.outputs.target_token }}
+          inputs: |
+            {
+              "repository": "${{ matrix.repository }}",
+              "source_token": "${{ steps.resolve-tokens.outputs.source_token }}",
+              "target_token": "${{ steps.resolve-tokens.outputs.target_token }}",
+              "issue_number": "${{ github.event.client_payload.batch.issueNumber }}",
+              "batch_number": "${{ env.BATCH_NUMBER }}",
+              "file_name": "${{ vars.LOCAL_CACHE_DIR }}/${{ env.SOURCE_ORG }}_environments.csv"
+            }
+
+      - name: Map mannequin users to real accounts
+        if: hashFiles('user-mappings-gei.csv') != ''
+        continue-on-error: true
+        run: |
+          gei reclaim-mannequin \
+            --csv user-mappings-gei.csv \
+            --github-target-org ${{ env.TARGET_ORG }} \
+            --github-target-pat ${{ steps.resolve-tokens.outputs.target_token }}
+
+      - name: Save repository migration result
+        if: always()
+        run: |
+          # Create status file
+          STATUS_FILE="${{ steps.repo-info.outputs.name }}.txt"
+          echo "${{ matrix.repository }}, ${{ job.status }}" > "$STATUS_FILE"
+          
+          # Also add to job summary for easy viewing
+          echo "| ${{ matrix.repository }} | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload status artifact for batch aggregation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-status-batch-${{ env.BATCH_NUMBER }}-${{ steps.repo-info.outputs.name }}
+          path: ${{ steps.repo-info.outputs.name }}.txt
+          retention-days: 7
+
+  generate-batch-report:
+    name: Batch ${{ github.event.client_payload.batch.batchNumber }} Summary
+    runs-on: ubuntu-latest
+    needs: [process-repository-migrations]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all repository status artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: migration-status-batch-${{ github.event.client_payload.batch.batchNumber }}-*
+          path: batch-${{ github.event.client_payload.batch.batchNumber }}-status
+          merge-multiple: true
+
+      - name: Generate batch completion report
+        uses: actions/github-script@v8
+        env:
+          BATCH_INFO: ${{ toJson(github.event.client_payload.batch) }}
+        with:
+          script: |
+            const script = require('./.github/scripts/orchestration/batch-status.js');
+            return await script({github, context, core});
+
+      - name: Save batch summary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ github.event.client_payload.batch.batchNumber }}-status
+          path: batch-${{ github.event.client_payload.batch.batchNumber }}-status.json
+          retention-days: 7

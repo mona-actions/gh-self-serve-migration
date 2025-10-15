@@ -1,0 +1,65 @@
+name: Resolve Tokens (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      source_instance:
+        description: 'Source instance name from instances.json'
+        required: false
+        type: string
+      target_instance:
+        description: 'Target instance name from instances.json'
+        required: true
+        type: string
+    outputs:
+      source_token:
+        description: 'Resolved source token'
+        value: ${{ jobs.resolve.outputs.source_token }}
+      target_token:
+        description: 'Resolved target token'
+        value: ${{ jobs.resolve.outputs.target_token }}
+      source_hostname:
+        description: 'Source hostname'
+        value: ${{ jobs.resolve.outputs.source_hostname }}
+      target_hostname:
+        description: 'Target hostname'
+        value: ${{ jobs.resolve.outputs.target_hostname }}
+    secrets:
+      GHEC_CLOUD_TOKEN:
+        required: false
+      GHES_PROD_TOKEN:
+        required: false
+      GHEC_EMU_TOKEN:
+        required: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_token: ${{ steps.resolve-tokens.outputs.source_token }}
+      target_token: ${{ steps.resolve-tokens.outputs.target_token }}
+      source_hostname: ${{ steps.resolve-tokens.outputs.source_hostname }}
+      target_hostname: ${{ steps.resolve-tokens.outputs.target_hostname }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Resolve tokens using resolve-tokens.js
+        id: resolve-tokens
+        uses: actions/github-script@v8
+        env:
+          GHEC_CLOUD_TOKEN: ${{ secrets.GHEC_CLOUD_TOKEN }}
+          GHES_PROD_TOKEN: ${{ secrets.GHES_PROD_TOKEN }}
+          GHEC_EMU_TOKEN: ${{ secrets.GHEC_EMU_TOKEN }}
+          SOURCE_INSTANCE: ${{ inputs.source_instance }}
+          TARGET_INSTANCE: ${{ inputs.target_instance }}
+        with:
+          script: |
+            const resolveTokens = require('./.github/scripts/config/resolve-tokens.js');
+            await resolveTokens({ core });

@@ -1,0 +1,203 @@
+name: Parse Repository List
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  acknowledge-repo-list:
+    if: |
+      contains(github.event.issue.labels.*.name, 'migration') &&
+      contains(github.event.issue.labels.*.name, 'batch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Debug - Show comment info
+        uses: actions/github-script@v8
+        with:
+          script: |
+            console.log('=== DEBUG INFO ===');
+            console.log('Comment user:', context.payload.comment.user.login);
+            console.log('Comment type:', context.payload.comment.user.type);
+            console.log('Comment body preview:', context.payload.comment.body.substring(0, 200));
+            console.log('Comment starts with /:', context.payload.comment.body.startsWith('/'));
+            console.log('=== END DEBUG ===');
+      
+      - name: Check if Step 3 exists (user should be at this step)
+        id: check-step
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const step3Exists = comments.data.some(c => 
+              c.body.includes('Step 3: Provide Repository URLs')
+            );
+            
+            const step4Exists = comments.data.some(c => 
+              c.body.includes('Step 4: Ready to Migrate')
+            );
+            
+            console.log('Step 3 exists:', step3Exists);
+            console.log('Step 4 exists:', step4Exists);
+            
+            core.setOutput('step3_exists', step3Exists.toString());
+            core.setOutput('step4_exists', step4Exists.toString());
+      
+      - name: Parse issue to get visibility
+        if: |
+          steps.check-step.outputs.step3_exists == 'true' &&
+          steps.check-step.outputs.step4_exists == 'false'
+        id: parse-issue
+        uses: stefanbuck/github-issue-parser@v3
+      
+      - name: Parse and validate repository list from comment
+        if: |
+          steps.check-step.outputs.step3_exists == 'true' &&
+          steps.check-step.outputs.step4_exists == 'false'
+        id: parse-repos
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            
+            if (body.startsWith('/') || context.payload.comment.user.type === 'Bot') {
+              console.log('Skipping command or bot comment');
+              return;
+            }
+            
+            const cleanedText = body
+              .replace(/<details[^>]*>/gi, '')
+              .replace(/<\/details>/gi, '')
+              .replace(/<summary[^>]*>/gi, '')
+              .replace(/<\/summary>/gi, '')
+              .replace(/<!--[\s\S]*?-->/g, '');
+            
+            const repoUrls = cleanedText
+              .split('\n')
+              .map(line => line.trim())
+              .filter(line => {
+                if (!line) return false;
+                if (line.includes('<') && line.includes('>')) return false;
+                if (line.startsWith('#') && !line.includes('://')) return false;
+                return line.includes('://') || line.includes('github.');
+              });
+            
+            console.log('Parsed URLs:', repoUrls);
+            
+            if (repoUrls.length === 0) {
+              console.log('No repository URLs found in comment');
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `### ⚠️ No Repository URLs Found\n\nI couldn't find any repository URLs in your comment.\n\n**Please provide URLs in this format:**\n\`\`\`\nhttps://github.com/org/repo1\nhttps://github.com/org/repo2\n\`\`\`\n\n**Your comment contained:**\n\`\`\`\n${body.substring(0, 500)}\n\`\`\`\n\nMake sure each URL is on its own line and includes \`https://\``
+              });
+              return;
+            }
+            
+            console.log(`Found ${repoUrls.length} repository URLs`);
+            core.setOutput('repo_count', repoUrls.length);
+            core.setOutput('repo_urls', JSON.stringify(repoUrls));
+            
+            const repoState = {
+              repositories: repoUrls,
+              count: repoUrls.length,
+              timestamp: new Date().toISOString()
+            };
+            
+            const repoList = repoUrls.map((url, i) => `${i + 1}. \`${url}\``).join('\n');
+            const jsonBlock = '```json\n' + JSON.stringify(repoState, null, 2) + '\n```';
+            const commentBody = `### ✅ Repository List Received\n\n**Count:** ${repoUrls.length} repositories\n\n<details>\n<summary>📋 Repositories</summary>\n\n${repoList}\n\n${jsonBlock}\n\n</details>\n\n---\n\n⏭️ **Proceeding to Step 4...**`;
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+      
+      - name: Extract selected organizations from JSON state
+        if: |
+          steps.parse-repos.outputs.repo_count != '' &&
+          steps.parse-repos.outputs.repo_count != '0'
+        id: extract-orgs
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const stateComment = comments.data.find(c => 
+              c.body.includes('✅ Organizations Selected') &&
+              c.body.includes('📊 Configuration Data')
+            );
+            
+            if (!stateComment) {
+              console.log('No org state found, using defaults');
+              core.setOutput('source_org', 'source-org');
+              core.setOutput('target_org', 'target-org');
+              return;
+            }
+            
+            const jsonMatch = stateComment.body.match(/```json\n([\s\S]*?)\n```/);
+            
+            if (!jsonMatch) {
+              console.log('Could not parse JSON from state comment');
+              core.setOutput('source_org', 'source-org');
+              core.setOutput('target_org', 'target-org');
+              return;
+            }
+            
+            const state = JSON.parse(jsonMatch[1]);
+            console.log(`Extracted from JSON: ${state.sourceOrg} → ${state.targetOrg}`);
+            core.setOutput('source_org', state.sourceOrg);
+            core.setOutput('target_org', state.targetOrg);
+
+      - name: Post Step 4 - Migration Instructions
+        if: |
+          steps.parse-repos.outputs.repo_count != '' &&
+          steps.parse-repos.outputs.repo_count != '0' &&
+          steps.parse-issue.outputs.jsonString != ''
+        uses: actions/github-script@v8
+        env:
+          REPO_URLS_JSON: ${{ steps.parse-repos.outputs.repo_urls }}
+          VISIBILITY: ${{ steps.parse-issue.outputs.jsonString && fromJSON(steps.parse-issue.outputs.jsonString)._target_repository_visibility || 'private' }}
+          TARGET_ORG: ${{ steps.extract-orgs.outputs.target_org }}
+          SOURCE_ORG: ${{ steps.extract-orgs.outputs.source_org }}
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const step4Exists = comments.data.some(c => 
+              c.body.includes('Step 4: Ready to Migrate')
+            );
+            
+            if (step4Exists) {
+              console.log('Step 4 already posted, skipping');
+              return;
+            }
+            
+            const repoUrls = JSON.parse(process.env.REPO_URLS_JSON);
+            const repoText = repoUrls.join('\n');
+            process.env.REPOSITORIES = repoText;
+            console.log(`Passing ${repoUrls.length} repos to init-issue.js`);
+            
+            const script = require('./.github/scripts/reporting/init-issue.js');
+            await script({github, context});
