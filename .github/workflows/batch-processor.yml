@@ -37,8 +37,7 @@ jobs:
       # Pass all tokens for dynamic resolution
       GHEC_CLOUD_TOKEN: ${{ secrets.GHEC_CLOUD_TOKEN }}
       GHES_PROD_TOKEN: ${{ secrets.GHES_PROD_TOKEN }}
-      GHEC_EMU_TOKEN: ${{ secrets.GHEC_EMU_TOKEN }}
-      
+      GHEC_EMU_TOKEN: ${{ secrets.GHEC_EMU_TOKEN }}    
 
     steps:
       - name: Checkout code
@@ -62,6 +61,20 @@ jobs:
           REPO_PATH=$(echo "${{ matrix.repository }}" | sed -E 's#https?://[^/]+/##')
           echo "name=$REPO_NAME" >> $GITHUB_OUTPUT
           echo "path=$REPO_PATH" >> $GITHUB_OUTPUT
+
+      - name: Check if repository has releases
+        id: check-releases
+        env:
+          LOCAL_CACHE_DIR: ${{ vars.LOCAL_CACHE_DIR || '/opt/migration' }}
+        run: |
+          RELEASES_DIR="$LOCAL_CACHE_DIR/releases/${{ steps.repo-info.outputs.path }}"
+          if [ -d "$RELEASES_DIR" ]; then
+            echo "has_releases=true" >> $GITHUB_OUTPUT
+            echo "Repository has pre-cached releases - will skip in GEI and migrate separately"
+          else
+            echo "has_releases=false" >> $GITHUB_OUTPUT
+            echo "Repository has no pre-cached releases - GEI will handle any releases under 10GB"
+          fi
 
       - name: Install GEI prerequisites
         if: env.INSTALL_PREREQS == 'true'
@@ -92,6 +105,11 @@ jobs:
           # Add lock flag for production migrations
           if [[ "$MIGRATION_TYPE" == "production" ]]; then
             ARGS+=("--lock-source-repo")
+          fi
+          
+          # Skip releases if pre-cached (meaning they'll be migrated separately)
+          if [[ "${{ steps.check-releases.outputs.has_releases }}" == "true" ]]; then
+            ARGS+=("--skip-releases")
           fi
           
           node "${ARGS[@]}"
@@ -144,14 +162,6 @@ jobs:
             echo "packages=true" >> $GITHUB_OUTPUT
           else
             echo "packages=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Check releases
-          RELEASES_DIR="$LOCAL_CACHE_DIR/releases/${{ steps.repo-info.outputs.path }}"
-          if [ -d "$RELEASES_DIR" ]; then
-            echo "releases=true" >> $GITHUB_OUTPUT
-          else
-            echo "releases=false" >> $GITHUB_OUTPUT
           fi
 
           # Check environments
@@ -211,7 +221,7 @@ jobs:
             }
 
       - name: Trigger releases data migration
-        if: steps.migration-checks.outputs.releases == 'true'
+        if: steps.check-releases.outputs.has_releases == 'true'
         uses: benc-uk/workflow-dispatch@v1
         with:
           workflow: releases.yml

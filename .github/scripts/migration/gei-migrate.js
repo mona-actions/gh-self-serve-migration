@@ -8,7 +8,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const params = {
     visibility: 'private', // default
-    skipReleases: true,
+    skipReleases: false,  // default to false - let GEI migrate releases if they exist
     queueOnly: true
   };
 
@@ -40,8 +40,8 @@ function parseArgs() {
       case '--lock-source':
         params.lockSource = true;
         break;
-      case '--no-skip-releases':
-        params.skipReleases = false;
+      case '--skip-releases':
+        params.skipReleases = true;
         break;
       case '--help':
         showHelp();
@@ -65,7 +65,7 @@ Options:
   --total-batches <n>          Total number of batches
   --source-hostname <host>     Custom GHES hostname (overrides URL parsing)
   --lock-source                Lock source repository during migration
-  --no-skip-releases           Include releases in migration
+  --skip-releases              Skip releases in migration
   --help                       Show this help message
 `);
 }
