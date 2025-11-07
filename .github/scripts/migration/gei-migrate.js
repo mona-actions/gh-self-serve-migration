@@ -208,14 +208,14 @@ async function main() {
 
   try {
     // Queue the migration
-    const migrationId = await execAndGetMigrationID('gei', geiArgs);
+    const migrationId = await execAndGetMigrationID('gh', ['gei', ...geiArgs]);
 
     if (migrationId) {
       console.log(`Queued migration of repository ${repoName} with ID ${migrationId}`);
       console.log('Waiting for migration to complete...');
 
       // Wait for migration to complete
-      await exec('gei', ['wait-for-migration', '--migration-id', migrationId]);
+      await exec('gh', ['gei', 'wait-for-migration', '--migration-id', migrationId]);
       console.log('Migration completed successfully');
 
       // Set output for GitHub Actions (if running in Actions)

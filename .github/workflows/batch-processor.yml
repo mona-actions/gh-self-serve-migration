@@ -79,15 +79,15 @@ jobs:
       - name: Install GEI prerequisites
         if: env.INSTALL_PREREQS == 'true'
         run: |
-          sudo apt-get update && sudo apt-get install -y \
-            git unzip curl wget apt-transport-https software-properties-common
-          
-          if ! command -v gei &> /dev/null; then
-            wget -q https://github.com/github/gh-gei/releases/latest/download/gei-linux-amd64
-            sudo install --owner root --group root --mode 755 gei-linux-amd64 /usr/local/bin/gei
+          # Check if gh-gei extension is installed
+          if ! gh extension ls | grep -q "gh-gei"; then
+            echo "Installing gh-gei extension..."
+            gh extension install github/gh-gei
+          else
+            echo "gh-gei extension already installed"
           fi
           
-          echo "GEI Version: $(gei --version)"
+          echo "GEI Version: $(gh gei --version)"
 
       - name: Execute GEI migration for ${{ matrix.repository }}
         id: migrate
