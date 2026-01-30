@@ -87,7 +87,7 @@ Before starting, ensure you have:
 **Using Template (Recommended for Easy Updates)**
 ```bash
 # 1. Use this repository as a template via GitHub UI
-#    Go to: https://github.com/cvega/migraction
+#    Go to: https://github.com/mona-actions/gh-self-serve-migration
 #    Click "Use this template" → "Create a new repository"
 #    Select your organization and name it (e.g., "migraction")
 
@@ -96,7 +96,7 @@ git clone https://github.com/YOUR-ORG/migraction.git
 cd migraction
 
 # 3. Add upstream for receiving framework updates
-git remote add upstream https://github.com/cvega/migraction.git
+git remote add upstream https://github.com/mona-actions/gh-self-serve-migration.git
 git fetch upstream
 ```
 
@@ -105,7 +105,7 @@ git fetch upstream
 **Alternative: Fork the Repository**
 ```bash
 # 1. Fork this repository to your organization via GitHub UI
-#    Go to: https://github.com/cvega/migraction
+#    Go to: https://github.com/mona-actions/gh-self-serve-migration
 #    Click "Fork" → Select your organization
 
 # 2. Clone your fork
@@ -116,7 +116,7 @@ cd migraction
 **Alternative: Clone and Push to New Repo**
 ```bash
 # 1. Clone the repository
-git clone https://github.com/cvega/migraction.git
+git clone https://github.com/mona-actions/gh-self-serve-migration.git
 cd migraction
 
 # 2. Create new repository in your org via GitHub UI or CLI

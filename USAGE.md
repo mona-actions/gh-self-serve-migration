@@ -560,8 +560,8 @@ This is expected behavior! You must manually update secrets:
 - 📖 **Setup Issues**: See [SETUP.md](SETUP.md)
 - 🔄 **Framework Updates**: See [UPDATING.md](UPDATING.md)
 - 🏗️ **Architecture Questions**: See [README.md](README.md)
-- 🐛 **Report Bugs**: [GitHub Issues](https://github.com/cvega/migraction/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/cvega/migraction/discussions)
+- 🐛 **Report Bugs**: [GitHub Issues](https://github.com/mona-actions/gh-self-serve-migration/issues)
+- 💬 **Discussions**: [GitHub Discussions](https://github.com/mona-actions/gh-self-serve-migration/discussions)
 
 ---
 
