@@ -43,6 +43,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check Node.js version
+        id: check-node
+        run: |
+          REQUIRED_VERSION=25
+          if command -v node >/dev/null 2>&1; then
+            CURRENT_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+            echo "Current Node.js version: v$CURRENT_VERSION"
+            if [ "$CURRENT_VERSION" -ge "$REQUIRED_VERSION" ]; then
+              echo "Node.js version $CURRENT_VERSION is compatible (>= $REQUIRED_VERSION)"
+              echo "needs_install=false" >> $GITHUB_OUTPUT
+            else
+              echo "Node.js version $CURRENT_VERSION is older than required $REQUIRED_VERSION"
+              echo "needs_install=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Node.js is not installed"
+            echo "needs_install=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Node.js
+        if: steps.check-node.outputs.needs_install == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+
       - name: Resolve tokens for source and target instances
         id: resolve-tokens
         uses: actions/github-script@v8
